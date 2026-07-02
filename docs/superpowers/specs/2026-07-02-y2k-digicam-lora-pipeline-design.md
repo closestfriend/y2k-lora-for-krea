@@ -45,7 +45,7 @@ package.py ─► dist/y2k-digicam-dataset.zip + dist/ATTRIBUTION.csv + dist/REA
 
 ### 3. `gallery.py` — curation gallery
 - Generates a single self-contained `curation/gallery.html`: thumbnails sorted by score (descending), lazy-loaded, click to toggle keep/reject, keyboard shortcuts (k/x/arrows), running keeper count, filter by camera/score range.
-- State persists in `localStorage`; an **Export** button downloads `keepers.json` (list of manifest filenames). No server needed — plain `file://`.
+- State persists in `localStorage`; an **Export** button downloads `keepers.json` (list of manifest filenames) via the browser — it lands in `~/Downloads`, so `fetch.py` accepts `--keepers PATH` and defaults to the newest `keepers.json` in `~/Downloads`, copying it to `curation/keepers.json` for the record. No server needed — plain `file://`.
 - This is the human "is this a banger" pass; target 50–150 keepers, consistency over volume.
 
 ### 4. `fetch.py` — full-res fetch
