@@ -25,7 +25,7 @@ button,select{background:#222;color:#eee;border:1px solid #444;padding:4px 8px}
 <label class="hint">min score pct <input id="minpct" type="range" min="0" max="99" value="0">
 <span id="pctval">0</span></label>
 <button id="export">Export keepers.json</button>
-<span class="hint">click/k=keep &middot; x=reject &middot; u=unmark &middot; arrows=move</span>
+<span class="hint">click=cycle keep/reject/unmarked &middot; k=keep &middot; x=reject &middot; u=unmark &middot; arrows=move</span>
 </header>
 <div id="grid"></div>
 <script>

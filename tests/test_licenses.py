@@ -5,7 +5,7 @@ from y2k_pipeline.licenses import (
 
 def test_allowed_licenses():
     for ok in ["CC BY-SA 3.0", "CC BY 2.0", "cc by-sa 4.0", "CC0",
-               "Public domain", "CC BY 2.5"]:
+               "Public domain", "CC BY 2.5", "CC0 1.0"]:
         assert is_allowed_license(ok), ok
     for bad in ["CC BY-NC 2.0", "CC BY-ND 3.0", "Fair use", "", None,
                 "GFDL", "CC BY-NC-SA 3.0"]:

@@ -12,6 +12,9 @@ from y2k_pipeline.manifest import load_manifest
 from y2k_pipeline.scoring import vibe_scores
 
 BATCH = 32
+# Must stay > 1: np.corrcoef needs >=2 samples to compute a correlation; at
+# N<=1 it silently returns NaN, and `NaN < SANITY_MIN_CORR` is False in
+# Python, so the sanity gate below would silently PASS instead of failing.
 SANITY_N = 20
 SANITY_MIN_CORR = 0.99
 
