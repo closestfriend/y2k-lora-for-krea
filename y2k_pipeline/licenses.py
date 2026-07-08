@@ -28,6 +28,9 @@ def parse_exif_date(value):
     if not m:
         return None
     y, mo, d = m.groups()
+    # Reject EXIF zero-date sentinel (dead clock/battery: "0000:00:00")
+    if y == "0000" and mo == "00" and d == "00":
+        return None
     return f"{y}-{mo}-{d}"
 
 

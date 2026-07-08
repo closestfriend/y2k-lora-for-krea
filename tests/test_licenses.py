@@ -24,6 +24,7 @@ def test_parse_exif_date():
     assert parse_exif_date("2005-06-12 20:41") == "2005-06-12"
     assert parse_exif_date("garbage") is None
     assert parse_exif_date(None) is None
+    assert parse_exif_date("0000:00:00 00:00:00") is None
 
 
 def test_classify_date():
