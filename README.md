@@ -1,0 +1,25 @@
+# y2k-lora-for-krea
+
+Dataset pipeline for a "2000s consumer digicam / early cameraphone" style LoRA
+targeting Krea 2 (trained via fal.ai `krea-2-trainer`).
+
+Spec: `docs/superpowers/specs/2026-07-02-y2k-digicam-lora-pipeline-design.md`
+
+## Runbook
+
+```bash
+source .venv/bin/activate
+python scrape.py                 # 1. harvest thumbs + manifest (hours; resumable)
+python rank.py                   # 2. SigLIP 2 vibe ranking (minutes)
+python gallery.py                # 3. build gallery, then: open curation/gallery.html
+#    ... click-curate 50-150 keepers, Export keepers.json ...
+python fetch.py                  # 4. full-res downloads for keepers
+python caption.py                # 5. Qwen3-VL captions -> .txt sidecars
+python caption.py --review       #    read captions, hand-edit .txt files as needed
+python package.py                # 6. dist/y2k-digicam-dataset.zip + ATTRIBUTION.csv
+```
+
+Then upload `dist/y2k-digicam-dataset.zip` to fal.ai `krea-2-trainer` with
+`trigger_phrase="y2k digicam snapshot style"`.
+
+Constraint: no Google Gemini anywhere in this pipeline.

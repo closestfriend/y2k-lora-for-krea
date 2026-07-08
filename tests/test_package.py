@@ -1,0 +1,40 @@
+import zipfile
+from package import build_zip, build_attribution, write_attribution_csv, build_readme
+from tests.test_manifest import make_row
+
+
+def _fixture(tmp_path):
+    d = tmp_path / "fullres"; d.mkdir()
+    for stem in ("a", "b"):
+        (d / f"{stem}.jpg").write_bytes(b"\xff\xd8fake")
+        (d / f"{stem}.txt").write_text(f"{stem} content, trig\n")
+    (d / "orphan.txt").write_text("no image\n")
+    return d
+
+
+def test_build_zip(tmp_path):
+    d = _fixture(tmp_path)
+    out = tmp_path / "out.zip"
+    n = build_zip(d, out)
+    assert n == 2
+    names = set(zipfile.ZipFile(out).namelist())
+    assert names == {"a.jpg", "a.txt", "b.jpg", "b.txt"}
+
+
+def test_attribution(tmp_path):
+    rows = [make_row("a.jpg"), make_row("b.jpg"), make_row("c.jpg")]
+    kept = build_attribution(rows, ["a.jpg", "c.jpg"])
+    assert [r.filename for r in kept] == ["a.jpg", "c.jpg"]
+    p = tmp_path / "attr.csv"
+    write_attribution_csv(kept, p)
+    text = p.read_text()
+    assert "filename,title,source_url,author,license,camera" in text
+    assert "a.jpg" in text and "b.jpg" not in text
+
+
+def test_readme():
+    rows = [make_row("a.jpg"), make_row("b.jpg")]
+    md = build_readme(rows, "y2k digicam snapshot style")
+    assert "y2k digicam snapshot style" in md
+    assert "CC BY-SA 3.0" in md and "Jane" in md
+    assert "2 images" in md
