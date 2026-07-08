@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import requests
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from y2k_pipeline import config
 from y2k_pipeline.manifest import load_manifest
@@ -61,9 +61,21 @@ def main():
             log_error(f"fullres {fn}: {e}")
             errors += 1
             continue
-        with Image.open(dest) as im:
-            if (im.width, im.height) != (row.width, row.height):
-                print(f"  WARN {fn}: {im.width}x{im.height} != manifest {row.width}x{row.height}")
+        # A 200 response doesn't guarantee a valid image (truncated body, an
+        # HTML error page served with a 200, etc.) -- Image.open() can raise
+        # on that even though the HTTP request itself "succeeded", so this
+        # has to be its own try/except rather than relying on the
+        # RequestException guard above. Same log-and-continue idiom as the
+        # download failure path: never crash the whole run over one file.
+        try:
+            with Image.open(dest) as im:
+                if (im.width, im.height) != (row.width, row.height):
+                    print(f"  WARN {fn}: {im.width}x{im.height} != manifest {row.width}x{row.height}")
+        except (UnidentifiedImageError, OSError) as e:
+            log_error(f"fullres {fn}: downloaded file is not a valid image ({e})")
+            dest.unlink(missing_ok=True)  # don't let a corrupt file block a future retry
+            errors += 1
+            continue
         done += 1
         print(f"  {done}/{len(keep)} {fn}")
         time.sleep(1.0)

@@ -1,6 +1,9 @@
 import json
 import zipfile
-from package import build_zip, build_attribution, write_attribution_csv, build_readme, main
+from package import (
+    build_zip, build_attribution, write_attribution_csv, build_readme, main,
+    list_images, find_missing_sidecars,
+)
 from tests.test_manifest import make_row
 from y2k_pipeline import config
 
@@ -81,3 +84,53 @@ def test_main_fails_on_count_mismatch(tmp_path, monkeypatch):
     except SystemExit as e:
         assert "Image count (2) != attribution row count (1)" in str(e)
         assert "drifted out of sync" in str(e)
+
+
+def test_find_missing_sidecars(tmp_path):
+    d = _fixture(tmp_path)
+    (d / "c.jpg").write_bytes(b"\xff\xd8fake")  # no c.txt sidecar
+    images = list_images(d)
+    assert find_missing_sidecars(images) == ["c.jpg"]
+
+
+def test_main_fails_on_missing_sidecar(tmp_path, monkeypatch):
+    """An image with no .txt sidecar must fail packaging loudly, even though
+    the count-mismatch check alone would pass (every image still has a
+    manifest/attribution row)."""
+    from y2k_pipeline.manifest import append_rows
+
+    fullres = tmp_path / "fullres"
+    fullres.mkdir()
+    (fullres / "a.jpg").write_bytes(b"\xff\xd8fake")
+    (fullres / "a.txt").write_text("a content, trig\n")
+    (fullres / "b.jpg").write_bytes(b"\xff\xd8fake")
+    # b.jpg deliberately has no b.txt sidecar (e.g. caption.py judged it degenerate)
+
+    curation = tmp_path / "curation"
+    curation.mkdir()
+    (curation / "keepers.json").write_text(json.dumps({"keep": ["a.jpg", "b.jpg"]}))
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    manifest_path = data_dir / "manifest.csv"
+    append_rows(manifest_path, [make_row("a.jpg"), make_row("b.jpg")])
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    monkeypatch.setattr(config, "FULLRES", fullres)
+    monkeypatch.setattr(config, "CURATION", curation)
+    monkeypatch.setattr(config, "DATA", data_dir)
+    monkeypatch.setattr(config, "DIST", dist)
+    monkeypatch.setattr(config, "TRIGGER_DEFAULT", "test trigger")
+
+    try:
+        main()
+        assert False, "Expected SystemExit to be raised"
+    except SystemExit as e:
+        assert "b.jpg" in str(e)
+        assert "missing .txt caption sidecar" in str(e)
+
+    # No partial/bad output should have been written to dist/ on failure.
+    assert not (dist / "y2k-digicam-dataset.zip").exists()
+    assert not (dist / "ATTRIBUTION.csv").exists()

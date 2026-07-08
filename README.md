@@ -16,6 +16,11 @@ python gallery.py                # 3. build gallery, then: open curation/gallery
 python fetch.py                  # 4. full-res downloads for keepers
 python caption.py                # 5. Qwen3-VL captions -> .txt sidecars
 python caption.py --review       #    read captions, hand-edit .txt files as needed
+#    WARNING: captions.json (not the .txt files) is the source of truth. Any
+#    re-run of caption.py regenerates ALL .txt sidecars from captions.json
+#    and silently overwrites hand-edits made directly to .txt files. If you
+#    hand-edit a caption, edit it in data/captions.json instead (or re-apply
+#    your .txt edits after every caption.py re-run).
 python package.py                # 6. dist/y2k-digicam-dataset.zip + ATTRIBUTION.csv
 ```
 

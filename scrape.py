@@ -7,7 +7,7 @@ import requests
 
 from y2k_pipeline import config
 from y2k_pipeline.commons import (
-    chunk, iter_category_files, imageinfo_params, parse_imageinfo_page, should_keep,
+    iter_category_files, imageinfo_params, parse_imageinfo_page, should_keep,
 )
 from y2k_pipeline.manifest import append_rows, load_manifest
 from y2k_pipeline.net import make_session, get_json, download, log_error

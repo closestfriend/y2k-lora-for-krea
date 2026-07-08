@@ -2,7 +2,7 @@ import html
 import re
 
 _TAG_RE = re.compile(r"<[^>]+>")
-_ALLOWED_EXACT = {"cc0", "public domain", "pd"}
+_ALLOWED_EXACT = {"cc0", "public domain", "pd", "cc0 1.0"}
 # any CC BY x.x or CC BY-SA x.x version; NC/ND never match this pattern
 _CC_RE = re.compile(r"^cc[ -]by(-sa)?[ -]\d\.\d$")
 _DATE_RE = re.compile(r"(\d{4})[:-](\d{2})[:-](\d{2})")
