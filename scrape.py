@@ -44,18 +44,21 @@ def process_batch(session, titles, category, existing, counts, kept_rows, cap):
 
 
 def scrape_category(session, category, existing, cap, limit):
-    counts, kept_rows, batch = Counter(), [], []
+    counts, batch = Counter(), []
     for title in iter_category_files(lambda p: get_json(session, p), category):
         counts["seen"] += 1
         batch.append(title)
         if len(batch) == 50:
+            kept_rows = []
             process_batch(session, batch, category, existing, counts, kept_rows, cap)
+            append_rows(MANIFEST, kept_rows)
             batch = []
         if counts["kept"] >= cap or (limit and counts["seen"] >= limit):
             break
     if batch and counts["kept"] < cap:
+        kept_rows = []
         process_batch(session, batch, category, existing, counts, kept_rows, cap)
-    append_rows(MANIFEST, kept_rows)
+        append_rows(MANIFEST, kept_rows)
     return counts
 
 
