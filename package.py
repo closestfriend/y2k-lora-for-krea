@@ -85,7 +85,12 @@ def main():
     (config.DIST / "README.md").write_text(
         build_readme(rows, config.TRIGGER_DEFAULT), encoding="utf-8")
     print(f"Packaged {n} images -> {out_zip}")
-    print(f"Attribution rows: {len(rows)} (should equal image count: {n == len(rows)})")
+    if n != len(rows):
+        raise SystemExit(
+            f"Image count ({n}) != attribution row count ({len(rows)}) — "
+            "data/fullres/ and curation/keepers.json have drifted out of sync; "
+            "fix before shipping."
+        )
 
 
 if __name__ == "__main__":

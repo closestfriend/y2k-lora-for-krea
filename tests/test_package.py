@@ -1,6 +1,8 @@
+import json
 import zipfile
-from package import build_zip, build_attribution, write_attribution_csv, build_readme
+from package import build_zip, build_attribution, write_attribution_csv, build_readme, main
 from tests.test_manifest import make_row
+from y2k_pipeline import config
 
 
 def _fixture(tmp_path):
@@ -38,3 +40,44 @@ def test_readme():
     assert "y2k digicam snapshot style" in md
     assert "CC BY-SA 3.0" in md and "Jane" in md
     assert "2 images" in md
+
+
+def test_main_fails_on_count_mismatch(tmp_path, monkeypatch):
+    """Verify main() raises SystemExit when zip image count != attribution row count."""
+    from y2k_pipeline.manifest import append_rows
+
+    # Create fullres dir with 2 images
+    fullres = tmp_path / "fullres"
+    fullres.mkdir()
+    (fullres / "a.jpg").write_bytes(b"\xff\xd8fake")
+    (fullres / "b.jpg").write_bytes(b"\xff\xd8fake")
+
+    # Create curation dir with keepers.json mentioning only 1 image (creating mismatch)
+    curation = tmp_path / "curation"
+    curation.mkdir()
+    (curation / "keepers.json").write_text(json.dumps({"keep": ["a.jpg"]}))
+
+    # Create manifest.csv with both images using append_rows
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    manifest_path = data_dir / "manifest.csv"
+    append_rows(manifest_path, [make_row("a.jpg"), make_row("b.jpg")])
+
+    # Create dist dir
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    # Mock config paths
+    monkeypatch.setattr(config, "FULLRES", fullres)
+    monkeypatch.setattr(config, "CURATION", curation)
+    monkeypatch.setattr(config, "DATA", data_dir)
+    monkeypatch.setattr(config, "DIST", dist)
+    monkeypatch.setattr(config, "TRIGGER_DEFAULT", "test trigger")
+
+    # main() should raise SystemExit due to count mismatch (2 images != 1 attribution row)
+    try:
+        main()
+        assert False, "Expected SystemExit to be raised"
+    except SystemExit as e:
+        assert "Image count (2) != attribution row count (1)" in str(e)
+        assert "drifted out of sync" in str(e)
