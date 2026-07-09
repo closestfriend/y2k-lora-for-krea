@@ -1,8 +1,8 @@
 import json
 import zipfile
 from package import (
-    build_zip, build_attribution, write_attribution_csv, build_readme, main,
-    list_images, find_missing_sidecars,
+    build_zip, build_attribution, write_attribution_csv, build_readme, run,
+    resolve_keeper_images, find_missing_sidecars,
 )
 from tests.test_manifest import make_row
 from y2k_pipeline import config
@@ -20,7 +20,7 @@ def _fixture(tmp_path):
 def test_build_zip(tmp_path):
     d = _fixture(tmp_path)
     out = tmp_path / "out.zip"
-    n = build_zip(d, out)
+    n = build_zip([d / "a.jpg", d / "b.jpg"], out)
     assert n == 2
     names = set(zipfile.ZipFile(out).namelist())
     assert names == {"a.jpg", "a.txt", "b.jpg", "b.txt"}
@@ -45,58 +45,65 @@ def test_readme():
     assert "2 images" in md
 
 
-def test_main_fails_on_count_mismatch(tmp_path, monkeypatch):
-    """Verify main() raises SystemExit when zip image count != attribution row count."""
+def test_resolve_keeper_images(tmp_path):
+    d = _fixture(tmp_path)
+    found, missing = resolve_keeper_images(d, ["a.jpg", "b.jpg", "ghost.jpg"])
+    assert [p.name for p in found] == ["a.jpg", "b.jpg"]
+    assert missing == ["ghost.jpg"]
+
+
+def test_find_missing_sidecars(tmp_path):
+    d = _fixture(tmp_path)
+    (d / "c.jpg").write_bytes(b"\xff\xd8fake")  # no c.txt sidecar
+    images = [d / "a.jpg", d / "b.jpg", d / "c.jpg"]
+    assert find_missing_sidecars(images) == ["c.jpg"]
+
+
+def test_run_fails_on_missing_keeper_image(tmp_path, monkeypatch):
+    """A keeper listed in keepers.json with no corresponding image on disk
+    (e.g. belongs to a different dataset's fetch batch that hasn't run yet,
+    when several datasets share one data/fullres/ pool) must fail packaging
+    loudly instead of silently shipping fewer images than keepers.json
+    claims."""
     from y2k_pipeline.manifest import append_rows
 
-    # Create fullres dir with 2 images
     fullres = tmp_path / "fullres"
     fullres.mkdir()
     (fullres / "a.jpg").write_bytes(b"\xff\xd8fake")
-    (fullres / "b.jpg").write_bytes(b"\xff\xd8fake")
+    (fullres / "a.txt").write_text("a content, trig\n")
+    # "b.jpg" is a keeper per keepers.json below but was never fetched.
 
-    # Create curation dir with keepers.json mentioning only 1 image (creating mismatch)
     curation = tmp_path / "curation"
     curation.mkdir()
-    (curation / "keepers.json").write_text(json.dumps({"keep": ["a.jpg"]}))
+    (curation / "keepers.json").write_text(json.dumps({"keep": ["a.jpg", "b.jpg"]}))
 
-    # Create manifest.csv with both images using append_rows
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    manifest_path = data_dir / "manifest.csv"
-    append_rows(manifest_path, [make_row("a.jpg"), make_row("b.jpg")])
+    append_rows(data_dir / "manifest.csv", [make_row("a.jpg"), make_row("b.jpg")])
 
-    # Create dist dir
     dist = tmp_path / "dist"
     dist.mkdir()
 
-    # Mock config paths
     monkeypatch.setattr(config, "FULLRES", fullres)
     monkeypatch.setattr(config, "CURATION", curation)
     monkeypatch.setattr(config, "DATA", data_dir)
     monkeypatch.setattr(config, "DIST", dist)
     monkeypatch.setattr(config, "TRIGGER_DEFAULT", "test trigger")
 
-    # main() should raise SystemExit due to count mismatch (2 images != 1 attribution row)
     try:
-        main()
+        run()
         assert False, "Expected SystemExit to be raised"
     except SystemExit as e:
-        assert "Image count (2) != attribution row count (1)" in str(e)
-        assert "drifted out of sync" in str(e)
+        assert "b.jpg" in str(e)
+        assert "no image on disk" in str(e)
+
+    assert not (dist / "y2k-digicam-dataset.zip").exists()
+    assert not (dist / "y2k-digicam-dataset-ATTRIBUTION.csv").exists()
 
 
-def test_find_missing_sidecars(tmp_path):
-    d = _fixture(tmp_path)
-    (d / "c.jpg").write_bytes(b"\xff\xd8fake")  # no c.txt sidecar
-    images = list_images(d)
-    assert find_missing_sidecars(images) == ["c.jpg"]
-
-
-def test_main_fails_on_missing_sidecar(tmp_path, monkeypatch):
+def test_run_fails_on_missing_sidecar(tmp_path, monkeypatch):
     """An image with no .txt sidecar must fail packaging loudly, even though
-    the count-mismatch check alone would pass (every image still has a
-    manifest/attribution row)."""
+    it has a valid manifest/attribution row and exists on disk."""
     from y2k_pipeline.manifest import append_rows
 
     fullres = tmp_path / "fullres"
@@ -112,8 +119,7 @@ def test_main_fails_on_missing_sidecar(tmp_path, monkeypatch):
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    manifest_path = data_dir / "manifest.csv"
-    append_rows(manifest_path, [make_row("a.jpg"), make_row("b.jpg")])
+    append_rows(data_dir / "manifest.csv", [make_row("a.jpg"), make_row("b.jpg")])
 
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -125,7 +131,7 @@ def test_main_fails_on_missing_sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TRIGGER_DEFAULT", "test trigger")
 
     try:
-        main()
+        run()
         assert False, "Expected SystemExit to be raised"
     except SystemExit as e:
         assert "b.jpg" in str(e)
@@ -133,4 +139,54 @@ def test_main_fails_on_missing_sidecar(tmp_path, monkeypatch):
 
     # No partial/bad output should have been written to dist/ on failure.
     assert not (dist / "y2k-digicam-dataset.zip").exists()
-    assert not (dist / "ATTRIBUTION.csv").exists()
+    assert not (dist / "y2k-digicam-dataset-ATTRIBUTION.csv").exists()
+
+
+def test_run_with_explicit_keepers_trigger_name(tmp_path, monkeypatch):
+    """run() accepts an explicit keepers path, trigger phrase, and output
+    name -- the mechanism that lets several datasets (e.g. a cameraphone-only
+    cut and a compact-digicam-only cut) be packaged from one shared
+    data/fullres/ pool without clobbering each other's outputs."""
+    from y2k_pipeline.manifest import append_rows
+
+    fullres = tmp_path / "fullres"
+    fullres.mkdir()
+    (fullres / "a.jpg").write_bytes(b"\xff\xd8fake")
+    (fullres / "a.txt").write_text("a content, trig\n")
+    (fullres / "b.jpg").write_bytes(b"\xff\xd8fake")
+    (fullres / "b.txt").write_text("b content, trig\n")
+
+    # Default keepers.json only lists "a" -- should be ignored in favor of
+    # the explicit subset keepers file passed to run().
+    curation = tmp_path / "curation"
+    curation.mkdir()
+    (curation / "keepers.json").write_text(json.dumps({"keep": ["a.jpg"]}))
+    subset_keepers = tmp_path / "keepers-subset.json"
+    subset_keepers.write_text(json.dumps({"keep": ["b.jpg"]}))
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    append_rows(data_dir / "manifest.csv", [make_row("a.jpg"), make_row("b.jpg")])
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    monkeypatch.setattr(config, "FULLRES", fullres)
+    monkeypatch.setattr(config, "CURATION", curation)
+    monkeypatch.setattr(config, "DATA", data_dir)
+    monkeypatch.setattr(config, "DIST", dist)
+    monkeypatch.setattr(config, "TRIGGER_DEFAULT", "default trigger")
+
+    run(keepers_path=subset_keepers, trigger="subset trigger", name="subset-dataset")
+
+    names = set(zipfile.ZipFile(dist / "subset-dataset.zip").namelist())
+    assert names == {"b.jpg", "b.txt"}  # only the subset keeper, not "a"
+
+    readme = (dist / "subset-dataset-README.md").read_text()
+    assert "subset trigger" in readme
+    assert "default trigger" not in readme
+    assert (dist / "subset-dataset-ATTRIBUTION.csv").exists()
+
+    # The default (unpackaged) dataset's outputs must not exist -- run() only
+    # touched the names it was given.
+    assert not (dist / "y2k-digicam-dataset.zip").exists()
