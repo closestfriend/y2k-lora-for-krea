@@ -2,6 +2,7 @@ import json
 from caption import (
     format_caption, write_sidecars, CAPTION_PROMPT,
     _opener_for, _is_degenerate, _model_is_cached, CAPTION_OPENERS,
+    _ollama_caption,
 )
 
 
@@ -52,6 +53,26 @@ def test_is_degenerate_accepts_real_caption():
     ) is False
 
 
+def test_is_degenerate_flags_repetition_loop():
+    # Real failure mode found in a 160-image live batch: a long caption
+    # that degenerates into one word repeated dozens of times, e.g.
+    # "small small small ... small" x119. This is long enough to sail past
+    # the length-only check, so it needs its own detection.
+    loop = "A photo of a " + "small " * 119
+    assert _is_degenerate(loop) is True
+
+
+def test_is_degenerate_accepts_caption_with_natural_repeated_word():
+    # A word appearing a few times in normal prose is not a repetition
+    # loop -- only high absolute count AND high fraction of the caption
+    # should trigger it.
+    text = (
+        "This photo shows a small dog sitting next to a small chair in a "
+        "small room with a window and a lamp on the table."
+    )
+    assert _is_degenerate(text) is False
+
+
 def test_model_is_cached_false_when_absent(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
     result = _model_is_cached("mlx-community/Qwen3-VL-4B-Instruct-4bit")
@@ -68,3 +89,37 @@ def test_model_is_cached_true_when_present(tmp_path, monkeypatch):
     result = _model_is_cached(repo_id)
     assert result is True
     assert isinstance(result, bool)
+
+
+def test_ollama_caption_returns_none_when_server_unreachable(tmp_path, monkeypatch):
+    # Real failure path (Ollama not running / wrong port) must return None,
+    # never raise -- run_model()'s fallback call site treats None the same
+    # as a degenerate result, not a crash.
+    import caption
+    monkeypatch.setattr(caption, "OLLAMA_API_URL", "http://localhost:1/api/generate")
+    img = tmp_path / "a.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+    assert _ollama_caption(img, "describe this") is None
+
+
+def test_ollama_caption_returns_response_text_on_success(tmp_path, monkeypatch):
+    import io
+    import caption
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": "  a real caption  "}).encode()
+
+    def fake_urlopen(req, timeout=60):
+        return FakeResponse()
+
+    monkeypatch.setattr(caption.urllib.request, "urlopen", fake_urlopen)
+    img = tmp_path / "a.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+    assert _ollama_caption(img, "describe this") == "a real caption"

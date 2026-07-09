@@ -1,11 +1,33 @@
-"""Stage 5: caption keepers with local Qwen3-VL; write fal-trainer .txt sidecars."""
+"""Stage 5: caption keepers with local MiniCPM-V (via Ollama), falling back
+to Qwen3-VL/mlx-vlm only if Ollama is unreachable; write fal-trainer .txt
+sidecars."""
 import argparse
+import base64
 import hashlib
 import json
 import os
+import urllib.error
+import urllib.request
+from collections import Counter
 from pathlib import Path
 
 from y2k_pipeline import config
+
+# Primary captioner, served by the local Ollama daemon (already installed --
+# no new dependency, no cloud call, no change to the project's no-Gemini
+# stance). Originally Qwen3-VL/mlx-vlm was primary, chosen because it's also
+# Krea 2's own text encoder -- a plausible-sounding but never empirically
+# verified rationale. Swapped after finding, on a real 160-image batch, that
+# Qwen3-VL/mlx-vlm 0.6.4 produces degenerate output (near-empty non-answers,
+# or long single-word repetition loops like "small small small...") on
+# 10%+ of images, deterministically -- re-running the same image at varied
+# temperature (0.0-0.6) with fresh model loads reproduces the identical
+# garbage every time, so it's a genuine per-image attractor, not noise a
+# retry fixes. MiniCPM-V via Ollama produced a clean, correct caption on
+# every one of those same images in testing. Qwen3-VL/mlx-vlm is kept as a
+# fallback (see _qwen_caption) for if Ollama isn't running.
+OLLAMA_API_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "minicpm-v4.6"
 
 CAPTION_PROMPT = (
     "Describe the literal content of this photo in one or two short sentences: "
@@ -17,11 +39,13 @@ CAPTION_PROMPT = (
 CAPTIONS_JSON = lambda: config.DATA / "captions.json"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
-# Assistant-response openers forced into the prompt before generation (see the
-# note in run_model): this model reliably answers CAPTION_PROMPT's "do not
-# mention X/Y/Z" constraint list with a near-empty non-answer ("A", "A
-# weather conditions...") on some images unless its reply is seeded to start
-# with an ordinary descriptive sentence opener.
+# Assistant-response openers forced into the prompt before generation, used
+# only by the Qwen3-VL fallback path (_qwen_caption) -- MiniCPM-V/Ollama
+# doesn't need this, it answers CAPTION_PROMPT directly (verified in
+# testing). Qwen3-VL reliably answers CAPTION_PROMPT's "do not mention
+# X/Y/Z" constraint list with a near-empty non-answer ("A", "A weather
+# conditions...") on some images unless its reply is seeded to start with an
+# ordinary descriptive sentence opener.
 #
 # This is a *rotating set*, not one fixed string: the pipeline's captioning
 # strategy (see design spec) relies on the trigger phrase being the ONLY
@@ -41,14 +65,20 @@ CAPTION_OPENERS = [
 ]
 
 # Minimum plausibility bar for a generated caption before it's accepted into
-# captions.json. The model has demonstrated fragility (degenerating to "",
-# "A", or similar near-empty non-answers on some images) even with the
-# opener-seeding fix above reducing the frequency. These thresholds catch the
-# empty/near-empty degenerate cases; they cannot catch every semantically
-# hollow-but-longer non-answer (e.g. a grammatically valid but content-free
-# sentence) without a much heavier check, which is out of scope here.
+# captions.json. The model has demonstrated fragility even with the
+# opener-seeding fix above reducing the frequency: short near-empty
+# non-answers ("", "A") and, separately, long repetition loops (e.g. "small"
+# repeated 100+ times) -- a real failure mode found by inspecting a 160-image
+# batch (~9% of captions) even with the per-image model reload from the
+# original mlx-vlm state-leak fix. The length check below catches the first
+# kind; the repetition check catches the second. Neither can catch every
+# semantically hollow-but-otherwise-normal-looking non-answer (e.g. a
+# grammatically valid but content-free sentence) without a much heavier
+# check, which is out of scope here.
 MIN_CAPTION_CHARS = 20
 MIN_CAPTION_WORDS = 4
+REPETITION_MIN_COUNT = 8
+REPETITION_MIN_FRACTION = 0.25
 
 
 def _opener_for(stem):
@@ -65,7 +95,11 @@ def _opener_for(stem):
 
 
 def _is_degenerate(text):
-    return len(text) < MIN_CAPTION_CHARS or len(text.split()) < MIN_CAPTION_WORDS
+    words = text.lower().split()
+    if len(text) < MIN_CAPTION_CHARS or len(words) < MIN_CAPTION_WORDS:
+        return True
+    top_word, top_count = Counter(words).most_common(1)[0]
+    return top_count >= REPETITION_MIN_COUNT and top_count / len(words) > REPETITION_MIN_FRACTION
 
 
 def format_caption(content, trigger):
@@ -84,6 +118,25 @@ def load_captions():
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def _ollama_caption(img_path, prompt, model=OLLAMA_MODEL, timeout=60):
+    """Caption one image via a local Ollama server. Returns the response
+    text, or None on any failure (server not running, model not pulled,
+    network hiccup) -- callers treat None the same as a degenerate result
+    from the primary model, never a crash."""
+    try:
+        img_b64 = base64.b64encode(img_path.read_bytes()).decode()
+        payload = json.dumps({
+            "model": model, "prompt": prompt, "images": [img_b64], "stream": False,
+        }).encode()
+        req = urllib.request.Request(
+            OLLAMA_API_URL, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)["response"].strip()
+    except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as e:
+        print(f"  Ollama unavailable ({e}) for {img_path.name}")
+        return None
+
+
 def _model_is_cached(repo_id):
     """Pure-filesystem check: is `repo_id` already in the local HF cache?
 
@@ -100,104 +153,95 @@ def _model_is_cached(repo_id):
     return snapshots.is_dir() and any(snapshots.iterdir())
 
 
-def run_model(images, captions, force):
-    # HF_HUB_OFFLINE note: mlx_vlm.load() reloads the model fresh per image
-    # (deviation 2 below), and each reload was found to make one real network
-    # call to the HF Hub (a freshness/etag check via `repo_info`) even when
-    # the weights are already fully cached locally -- confirmed by patching
+def _qwen_caption(img):
+    """Fallback captioner, used only when Ollama is unreachable or returns a
+    degenerate result (see run_model). Three verified deviations from the
+    brief's pseudocode, found by live-testing against mlx-vlm 0.6.4 +
+    mlx-community/Qwen3-VL-4B-Instruct-4bit on real images in data/fullres/:
+
+    1) resize_shape=(1024, 1024): source images are kept full-res on disk
+       for training, but feeding this quantized VLM the raw full-res pixels
+       (e.g. 1944x2592 -> ~4965 image tokens) makes it degenerate to
+       near-empty output ("", "A"). Resizing the copy sent to the model to
+       1024x1024 (~792 prompt tokens) fixed that. This only affects what the
+       VLM sees for captioning, not the saved image.
+
+    2) Reload the model fresh for every image instead of loading once and
+       looping generate() calls over it (as the brief's pseudocode does).
+       Calling generate() more than once against the same loaded
+       (model, processor) reliably corrupted output on the 2nd+ call
+       regardless of prompt/temperature -- the exact image+prompt that
+       produced a good caption on a fresh load degenerated into an infinite
+       "an an an..." / "a a a..." repeat loop when it was the 2nd or later
+       generate() call in the same process. Looks like leftover/corrupted
+       state (e.g. vision-tower or KV-cache reuse) in mlx-vlm 0.6.4 for this
+       model, not a decoding hyperparameter issue. Each load() is ~1.5s with
+       a warm HF cache -- acceptable since this is now only the fallback
+       path, not the primary captioner for every image.
+
+    3) Opener seeding: even with (1) and (2) applied, CAPTION_PROMPT's "do
+       not mention grain/flash/camera/era/style" constraint list alone
+       (independent of image resolution or repeated-call state) reliably
+       made this small 4B model answer with a near-empty non-answer on some
+       images ("A weather conditions and the time of day.", "A") instead of
+       an actual description -- reproduced with fresh loads and varied
+       temperature 0.0-0.7, so it's the model's response to the
+       negation-heavy instruction, not noise. Forcing its reply to start
+       with an ordinary descriptive opener steers it back to real content
+       every time in testing; the chosen opener (see
+       CAPTION_OPENERS/_opener_for -- rotated per image, not one fixed
+       string, so it doesn't become a second universal trigger-like
+       constant) is prepended to the saved caption to reconstruct the full
+       sentence.
+    """
+    # HF_HUB_OFFLINE note: mlx_vlm.load() makes one real network call to the
+    # HF Hub (a freshness/etag check via `repo_info`) even when the weights
+    # are already fully cached locally -- confirmed by patching
     # `socket.socket.connect` and observing one live TCP connection per
-    # load() call. The natural fix is `HF_HUB_OFFLINE=1`, but
-    # huggingface_hub reads that env var into a module-level constant
+    # load() call. The natural fix is `HF_HUB_OFFLINE=1`, but huggingface_hub
+    # reads that env var into a module-level constant
     # (`huggingface_hub.constants.HF_HUB_OFFLINE`) the FIRST time the module
-    # is imported, and every other module in the library binds its own
-    # reference to that same boolean at import time -- so setting
-    # `os.environ["HF_HUB_OFFLINE"]` *after* huggingface_hub has already
-    # been imported (e.g. after the first load() call in this process, as
-    # naively expected) silently does nothing: confirmed empirically with a
-    # socket spy -- it looked like it worked on an immediate 2nd call (some
-    # short-lived unrelated connection-reuse briefly masked the problem),
-    # but adding a few seconds' delay between calls (as this loop naturally
-    # has, from generate() running in between) exposed that the network
-    # call still happens every time regardless of the env var. `load()`
-    # also doesn't accept/forward a `local_files_only` kwarg to its internal
-    # `snapshot_download` call, so there's no fine-grained per-call override
-    # either.
-    #
-    # The only reliable fix is to decide *before* mlx_vlm/huggingface_hub is
-    # ever imported in this process. So: check whether the model is already
-    # cached with a plain filesystem check (no import needed), and if so,
-    # set HF_HUB_OFFLINE=1 before importing mlx_vlm at all -- verified with
-    # a socket spy across 3 loads with real delays between them: zero
-    # network calls. If the model is NOT cached yet (first-ever run on a
-    # fresh machine), leave the env var unset so the real cold-start
-    # download can happen; every load() in that run will then still touch
-    # the network per image (this is a real, accepted limitation of
-    # mlx_vlm's API for that one-time bootstrap case only -- re-running
-    # after the first successful run fixes it, since the model is cached by
-    # then).
+    # is imported -- so it must be set *before* mlx_vlm/huggingface_hub is
+    # ever imported in this process, not after. So: check whether the model
+    # is already cached with a plain filesystem check (no import needed),
+    # and if so, set HF_HUB_OFFLINE=1 before importing mlx_vlm at all. If the
+    # model is NOT cached yet (first-ever run on a fresh machine), leave the
+    # env var unset so the real cold-start download can happen.
     if _model_is_cached(config.QWEN_VL_CKPT):
         os.environ["HF_HUB_OFFLINE"] = "1"
 
-    # Local import: mlx-vlm is Apple-Silicon-only and slow to import. Also
-    # must happen after the HF_HUB_OFFLINE decision above, not before.
+    # Local, lazy import: mlx-vlm is Apple-Silicon-only and slow to import.
+    # Python caches the import after the first call, so this only pays the
+    # real import cost once per process, and never at all in a run where
+    # Ollama handles every image (the common case now).
     from mlx_vlm import load, generate
     from mlx_vlm.prompt_utils import apply_chat_template
 
+    opener = _opener_for(img.stem)
+    model, processor = load(config.QWEN_VL_CKPT)
+    prompt = apply_chat_template(processor, model.config, CAPTION_PROMPT, num_images=1)
+    res = generate(model, processor, prompt + opener, image=[str(img)],
+                   max_tokens=120, temperature=0.0, resize_shape=(1024, 1024),
+                   verbose=False)
+    text = res.text if hasattr(res, "text") else str(res)
+    return (opener + text).strip()
+
+
+def run_model(images, captions, force):
     for i, img in enumerate(images):
         if img.stem in captions and not force:
             continue
-        # Three verified deviations from the brief's pseudocode, found by
-        # live-testing against mlx-vlm 0.6.4 +
-        # mlx-community/Qwen3-VL-4B-Instruct-4bit on the real images in
-        # data/fullres/:
-        #
-        # 1) resize_shape=(1024, 1024): our source images are kept full-res
-        #    on disk for training, but feeding this quantized VLM the raw
-        #    full-res pixels (e.g. 1944x2592 -> ~4965 image tokens) makes it
-        #    degenerate to near-empty output ("", "A"). Resizing the copy
-        #    sent to the model to 1024x1024 (~792 prompt tokens) fixed that.
-        #    This only affects what the VLM sees for captioning, not the
-        #    saved image.
-        #
-        # 2) Reload the model fresh for every image instead of loading once
-        #    and looping generate() calls over it (as the brief's
-        #    pseudocode does). Calling generate() more than once against the
-        #    same loaded (model, processor) reliably corrupted output on the
-        #    2nd+ call regardless of prompt/temperature -- the exact
-        #    image+prompt that produced a good caption on a fresh load
-        #    degenerated into an infinite "an an an..." / "a a a..." repeat
-        #    loop when it was the 2nd or later generate() call in the same
-        #    process. Reproduced consistently across repeated tests, so this
-        #    looks like leftover/corrupted state (e.g. vision-tower or
-        #    KV-cache reuse) in mlx-vlm 0.6.4 for this model, not a decoding
-        #    hyperparameter issue. Each load() is ~1.5s with a warm HF
-        #    cache, acceptable for this small, offline, run-once batch.
-        #
-        # 3) Opener seeding: even with (1) and (2) applied, CAPTION_PROMPT's
-        #    "do not mention grain/flash/camera/era/style" constraint list
-        #    alone (independent of image resolution or repeated-call state)
-        #    reliably made this small 4B model answer with a near-empty
-        #    non-answer on some images ("A weather conditions and the time
-        #    of day.", "A") instead of an actual description -- reproduced
-        #    with fresh loads and varied temperature 0.0-0.7, so it's the
-        #    model's response to the negation-heavy instruction, not noise.
-        #    Forcing its reply to start with an ordinary descriptive opener
-        #    steers it back to real content every time in testing; the
-        #    chosen opener (see CAPTION_OPENERS/_opener_for -- rotated per
-        #    image, not one fixed string, so it doesn't become a second
-        #    universal trigger-like constant) is prepended to the saved
-        #    caption to reconstruct the full sentence.
-        opener = _opener_for(img.stem)
-        model, processor = load(config.QWEN_VL_CKPT)
-        prompt = apply_chat_template(processor, model.config, CAPTION_PROMPT, num_images=1)
-        res = generate(model, processor, prompt + opener, image=[str(img)],
-                       max_tokens=120, temperature=0.0, resize_shape=(1024, 1024),
-                       verbose=False)
-        text = res.text if hasattr(res, "text") else str(res)
-        caption_text = (opener + text).strip()
-        if _is_degenerate(caption_text):
-            print(f"WARN: degenerate caption for {img.stem}, skipping — got: {caption_text!r}")
-            continue
+        caption_text = _ollama_caption(img, CAPTION_PROMPT)
+        if caption_text is None or _is_degenerate(caption_text):
+            reason = "unreachable" if caption_text is None else f"degenerate ({caption_text[:60]!r}...)"
+            print(f"  {img.stem}: Ollama/{OLLAMA_MODEL} {reason}, trying Qwen3-VL fallback")
+            fallback_text = _qwen_caption(img)
+            if fallback_text and not _is_degenerate(fallback_text):
+                caption_text = fallback_text
+            else:
+                print(f"WARN: degenerate caption for {img.stem} (both models failed), "
+                      f"skipping — got: {caption_text!r}")
+                continue
         captions[img.stem] = caption_text
         CAPTIONS_JSON().write_text(json.dumps(captions, indent=1))  # save as we go
         print(f"  {i + 1}/{len(images)} {img.stem}: {captions[img.stem][:80]}")
