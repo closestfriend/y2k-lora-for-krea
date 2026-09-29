@@ -142,9 +142,8 @@ def test_run_fails_on_missing_sidecar(tmp_path, monkeypatch):
     assert not (dist / "y2k-digicam-dataset-ATTRIBUTION.csv").exists()
 
 
-def test_run_with_explicit_keepers_trigger_name(tmp_path, monkeypatch):
-    """run() accepts an explicit keepers path, trigger phrase, and output
-    name -- the mechanism that lets several datasets (e.g. a cameraphone-only
+def test_run_with_explicit_keepers_and_name(tmp_path, monkeypatch):
+    """run() accepts an explicit keepers path and output name -- the mechanism that lets several datasets (e.g. a cameraphone-only
     cut and a compact-digicam-only cut) be packaged from one shared
     data/fullres/ pool without clobbering each other's outputs."""
     from y2k_pipeline.manifest import append_rows
@@ -175,18 +174,33 @@ def test_run_with_explicit_keepers_trigger_name(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CURATION", curation)
     monkeypatch.setattr(config, "DATA", data_dir)
     monkeypatch.setattr(config, "DIST", dist)
-    monkeypatch.setattr(config, "TRIGGER_DEFAULT", "default trigger")
 
-    run(keepers_path=subset_keepers, trigger="subset trigger", name="subset-dataset")
+    run(keepers_path=subset_keepers, name="subset-dataset")
 
     names = set(zipfile.ZipFile(dist / "subset-dataset.zip").namelist())
     assert names == {"b.jpg", "b.txt"}  # only the subset keeper, not "a"
 
     readme = (dist / "subset-dataset-README.md").read_text()
-    assert "subset trigger" in readme
-    assert "default trigger" not in readme
+    # Trigger comes from the sidecars ("b content, trig"), not a passed-in string.
+    assert "**Trigger phrase:** `trig`" in readme
     assert (dist / "subset-dataset-ATTRIBUTION.csv").exists()
 
     # The default (unpackaged) dataset's outputs must not exist -- run() only
     # touched the names it was given.
     assert not (dist / "y2k-digicam-dataset.zip").exists()
+
+
+def test_detect_trigger_reads_captions_and_rejects_mixed(tmp_path):
+    from package import detect_trigger
+    for stem, trig in [("a", "style x"), ("b", "style x")]:
+        (tmp_path / f"{stem}.jpg").write_bytes(b"\xff\xd8")
+        (tmp_path / f"{stem}.txt").write_text(f"{stem} scene, {trig}\n")
+    imgs = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    assert detect_trigger(imgs) == "style x"
+
+    (tmp_path / "b.txt").write_text("b scene, other phrase\n")
+    try:
+        detect_trigger(imgs)
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert "one trigger phrase" in str(e)
