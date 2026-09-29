@@ -5,3 +5,7 @@ data/
 dist/
 curation/gallery.html
 .pytest_cache/
+weights/
+.claude/
+.DS_Store
+venv-packages-snapshot-*.txt
