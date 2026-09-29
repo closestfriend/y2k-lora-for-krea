@@ -43,6 +43,23 @@ def find_missing_sidecars(images):
     return sorted(img.name for img in images if not img.with_suffix(".txt").exists())
 
 
+def detect_trigger(images):
+    """Return the trigger phrase actually written into the caption sidecars.
+
+    caption.py appends the trigger to every caption (", <trigger>"), so the
+    zip's captions are the source of truth for it -- the README must quote
+    what the trainer will see, not a separately supplied string. Raises
+    SystemExit if the sidecars don't all end in the same phrase."""
+    phrases = {img.with_suffix(".txt").read_text(encoding="utf-8").strip()
+               .rsplit(", ", 1)[-1] for img in images}
+    if len(phrases) != 1:
+        raise SystemExit(
+            f"captions do not share one trigger phrase (found {sorted(phrases)}) "
+            "-- re-run caption.py before packaging."
+        )
+    return phrases.pop()
+
+
 def build_zip(images, out_zip):
     """Zip the given full-res image Paths + their .txt sidecars (if present)
     at the zip root. `images` must already be resolved to existing files
@@ -109,15 +126,14 @@ def build_readme(rows, trigger):
     return "\n".join(lines)
 
 
-def run(keepers_path=None, trigger=None, name="y2k-digicam-dataset"):
+def run(keepers_path=None, name="y2k-digicam-dataset"):
     """Package one dataset. Defaults reproduce the original single-dataset
-    behavior (curation/keepers.json, config.TRIGGER_DEFAULT); pass explicit
-    args to package a named subset/variant from a shared data/fullres/ pool
-    (e.g. a cameraphone-only cut, a compact-digicam-only cut, or a combined
-    cut of the same scraped image pool -- each with its own trigger phrase)."""
+    behavior (curation/keepers.json); pass explicit args to package a named
+    subset/variant from a shared data/fullres/ pool (e.g. a cameraphone-only
+    cut, a compact-digicam-only cut, or a combined cut of the same scraped
+    image pool). The trigger phrase is read from the captions themselves."""
     config.ensure_dirs()
     keepers_path = Path(keepers_path) if keepers_path else config.CURATION / "keepers.json"
-    trigger = trigger or config.TRIGGER_DEFAULT
     keep = json.loads(keepers_path.read_text())["keep"]
     rows = build_attribution(load_manifest(config.DATA / "manifest.csv"), keep)
 
@@ -139,6 +155,7 @@ def run(keepers_path=None, trigger=None, name="y2k-digicam-dataset"):
             "image must never ship in the training zip."
         )
 
+    trigger = detect_trigger(images)
     out_zip = config.DIST / f"{name}.zip"
     n_zipped = build_zip(images, out_zip)
     write_attribution_csv(rows, config.DIST / f"{name}-ATTRIBUTION.csv")
@@ -151,12 +168,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--keepers", default=None,
                      help="path to a keepers.json (default: curation/keepers.json)")
-    ap.add_argument("--trigger", default=None,
-                     help="trigger phrase for this dataset (default: config.TRIGGER_DEFAULT)")
     ap.add_argument("--name", default="y2k-digicam-dataset",
                      help="base filename for dist/ outputs, e.g. dist/<name>.zip")
     args = ap.parse_args()
-    run(keepers_path=args.keepers, trigger=args.trigger, name=args.name)
+    run(keepers_path=args.keepers, name=args.name)
 
 
 if __name__ == "__main__":
