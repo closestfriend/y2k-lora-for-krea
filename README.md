@@ -32,3 +32,8 @@ Qwen3-VL via mlx-vlm is kept only as a fallback if Ollama isn't running; it prod
 degenerate captions (near-empty or repetition loops) on 10%+ of images in testing.
 
 Constraint: no Google Gemini anywhere in this pipeline.
+
+## Licenses
+
+- **Code** (this repo): MIT, see `LICENSE`.
+- **Images:** not in this repo. They come from Wikimedia Commons and each keeps its own license (CC0, public domain, CC BY, CC BY-SA). Per-file license, author and source URL are in the published dataset: <https://huggingface.co/datasets/closestfriend/y2k-digicam>
